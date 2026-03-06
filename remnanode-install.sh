@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ╔════════════════════════════════════════════════════════════════╗
-# ║  Упрощенный скрипт установки RemnawaveNode + Caddy Selfsteal   ║
-# ║  Wildcard Сертификат (DNS-01 challenge через Cloudflare)
-# ║  Только установка, без лишних функций                           ║
+# ║  Remnawave Node Installer v3                                    ║
+# ║  Установка, обновление и диагностика RemnawaveNode + Caddy      ║
+# ║  HTTP-01 / DNS-01 (Cloudflare) сертификаты                      ║
 # ╚════════════════════════════════════════════════════════════════╝
 
 set -Eeuo pipefail
@@ -724,13 +724,8 @@ run_selective_install() {
     ensure_package_manager_available
     _RESTORE_AUTO_UPDATES=true
 
-    # Установка curl/wget если нужны
-    if ! command -v curl >/dev/null 2>&1; then
-        install_package curl || { log_error "Не удалось установить curl"; return 1; }
-    fi
-    if ! command -v wget >/dev/null 2>&1; then
-        install_package wget || { log_error "Не удалось установить wget"; return 1; }
-    fi
+    # Установка базовых утилит
+    install_base_utilities
 
     # Автоопределение версий
     update_component_versions
@@ -1155,6 +1150,104 @@ restore_auto_updates() {
     done
 }
 
+# Установка базовых утилит
+install_base_utilities() {
+    log_info "Проверка и установка необходимых пакетов..."
+
+    # Обязательные утилиты (без них скрипт не работает)
+    local -a required=("curl" "wget")
+    for pkg in "${required[@]}"; do
+        if ! command -v "$pkg" >/dev/null 2>&1; then
+            if install_package "$pkg"; then
+                log_success "$pkg установлен"
+            else
+                log_error "Не удалось установить $pkg (обязательный)"
+                return 1
+            fi
+        else
+            log_success "$pkg уже установлен"
+        fi
+    done
+
+    # Опциональные утилиты
+    # Формат: "команда:пакет:описание"
+    local -a optional=(
+        "nano:nano:текстовый редактор"
+        "btop:btop:монитор ресурсов"
+        "jq:jq:парсер JSON"
+        "htop:htop:монитор процессов"
+        "iotop:iotop:монитор дисковых операций"
+        "ncdu:ncdu:анализ дискового пространства"
+        "tmux:tmux:мультиплексор терминала"
+        "unzip:unzip:распаковка ZIP архивов"
+    )
+
+    # Собираем список отсутствующих утилит
+    local -a missing=()
+    for entry in "${optional[@]}"; do
+        local cmd="${entry%%:*}"
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing+=("$entry")
+        fi
+    done
+
+    if [ ${#missing[@]} -eq 0 ]; then
+        log_success "Все базовые утилиты уже установлены"
+        return 0
+    fi
+
+    echo
+    echo -e "${WHITE}📦 Доступные утилиты для установки:${NC}"
+    echo
+    local i=1
+    for entry in "${missing[@]}"; do
+        local cmd="${entry%%:*}"
+        local rest="${entry#*:}"
+        local pkg="${rest%%:*}"
+        local desc="${rest#*:}"
+        printf "   ${CYAN}%2d)${NC} %-10s — %s\n" "$i" "$pkg" "$desc"
+        i=$((i + 1))
+    done
+    echo
+    echo -e "   ${CYAN} a)${NC} ${WHITE}Установить все${NC}"
+    echo -e "   ${CYAN} s)${NC} ${GRAY}Пропустить${NC}"
+    echo
+
+    local util_choice
+    if [ "${NON_INTERACTIVE:-false}" = true ]; then
+        util_choice="a"
+    else
+        read -p "Выберите (номера через пробел, a=все, s=пропустить): " -r util_choice
+    fi
+
+    if [ "$util_choice" = "s" ] || [ -z "$util_choice" ]; then
+        log_info "Установка дополнительных утилит пропущена"
+        return 0
+    fi
+
+    local -a to_install=()
+    if [ "$util_choice" = "a" ]; then
+        to_install=("${missing[@]}")
+    else
+        for num in $util_choice; do
+            if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -ge 1 ] && [ "$num" -le ${#missing[@]} ]; then
+                to_install+=("${missing[$((num - 1))]}")
+            fi
+        done
+    fi
+
+    for entry in "${to_install[@]}"; do
+        local cmd="${entry%%:*}"
+        local rest="${entry#*:}"
+        local pkg="${rest%%:*}"
+        if install_package "$pkg"; then
+            log_success "$pkg установлен"
+        else
+            log_warning "Не удалось установить $pkg (некритично)"
+        fi
+    done
+}
+
 # Установка Docker
 install_docker() {
     if command -v docker >/dev/null 2>&1; then
@@ -1278,7 +1371,7 @@ check_docker_compose() {
     
     log_error "Docker Compose V2 не найден или не отвечает"
     log_error "Убедитесь что Docker установлен правильно: docker --version"
-    exit 1
+    return 1
 }
 
 # Полная настройка UFW файервола
@@ -1672,11 +1765,12 @@ install_remnanode() {
                 log_warning "Продолжаем установку без Xray-core"
             else
                 log_error "Установка прервана"
-                exit 1
+                STATUS_REMNANODE="ошибка"
+                return 1
             fi
         fi
     fi
-    
+
     # Создание .env файла
     cat > "$REMNANODE_DIR/.env" << EOF
 ### NODE ###
@@ -1996,7 +2090,7 @@ check_existing_certificate() {
         if docker run --rm \
             -v caddy_data:/data:ro \
             alpine:latest \
-            sh -c 'find /data/caddy/certificates -type d -name "*'"$1"'*" 2>/dev/null | head -1' _ "$domain_to_check" 2>/dev/null | grep -q .; then
+            sh -c 'find /data/caddy/certificates -type d -name "*$1*" 2>/dev/null | head -1' _ "$domain_to_check" 2>/dev/null | grep -q .; then
             cert_found=true
             cert_location="Caddy volume (caddy_data)"
         fi
@@ -3238,45 +3332,8 @@ run_full_install() {
 
     echo
 
-    # Установка необходимых пакетов
-    log_info "Проверка и установка необходимых пакетов..."
-    if ! command -v curl >/dev/null 2>&1; then
-        if ! install_package curl; then
-            log_error "Не удалось установить curl"
-            exit 1
-        fi
-        log_success "curl установлен"
-    else
-        log_success "curl уже установлен"
-    fi
-    if ! command -v wget >/dev/null 2>&1; then
-        if ! install_package wget; then
-            log_error "Не удалось установить wget"
-            exit 1
-        fi
-        log_success "wget установлен"
-    else
-        log_success "wget уже установлен"
-    fi
-    # Опциональные утилиты (не требуются для работы)
-    if ! command -v nano >/dev/null 2>&1 || ! command -v btop >/dev/null 2>&1; then
-        if prompt_yn "Установить дополнительные утилиты (nano, btop)? (y/n): " "n"; then
-            if ! command -v nano >/dev/null 2>&1; then
-                if install_package nano; then
-                    log_success "nano установлен"
-                else
-                    log_warning "Не удалось установить nano (некритично)"
-                fi
-            fi
-            if ! command -v btop >/dev/null 2>&1; then
-                if install_package btop; then
-                    log_success "btop установлен"
-                else
-                    log_warning "Не удалось установить btop (некритично)"
-                fi
-            fi
-        fi
-    fi
+    # Установка необходимых и полезных пакетов
+    install_base_utilities
     echo
 
     # [2/8] Установка Docker

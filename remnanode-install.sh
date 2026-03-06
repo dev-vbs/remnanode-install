@@ -55,7 +55,7 @@ readonly BOLD='\033[1m'
 readonly DIM='\033[2m'
 
 # Версия скрипта
-readonly SCRIPT_VERSION="2.6.0"
+readonly SCRIPT_VERSION="3.0.0"
 
 # Константы
 INSTALL_DIR="/opt"
@@ -211,11 +211,11 @@ prompt_choice() {
             printf -v "$result_var" '%s' "$default"
             return 0
         fi
-        if [[ "$_choice" =~ ^[0-9]+$ ]] && [ "$_choice" -ge 1 ] && [ "$_choice" -le "$max" ]; then
+        if [[ "$_choice" =~ ^[0-9]+$ ]] && [ "$_choice" -ge 0 ] && [ "$_choice" -le "$max" ]; then
             printf -v "$result_var" '%s' "$_choice"
             return 0
         fi
-        log_warning "Неверный выбор. Введите число от 1 до $max."
+        log_warning "Неверный выбор. Введите число от 0 до $max."
     done
 }
 
@@ -373,8 +373,24 @@ load_config_file() {
             log_warning "Конфиг-файл $config_file доступен на запись группе/другим (права: $file_perms)"
         fi
         log_info "Загрузка конфигурации из $config_file"
-        # shellcheck source=/dev/null
-        source "$config_file"
+        # Безопасный парсинг: извлекаем только известные CFG_* переменные (без eval/source)
+        local _allowed_vars="CFG_SECRET_KEY CFG_NODE_PORT CFG_INSTALL_XRAY CFG_DOMAIN CFG_CERT_TYPE CFG_CLOUDFLARE_TOKEN CFG_CADDY_PORT CFG_INSTALL_NETBIRD CFG_NETBIRD_SETUP_KEY CFG_INSTALL_MONITORING CFG_INSTANCE_NAME CFG_GRAFANA_IP CFG_APPLY_NETWORK CFG_SETUP_UFW CFG_INSTALL_FAIL2BAN NON_INTERACTIVE"
+        while IFS='=' read -r key value; do
+            # Пропуск комментариев и пустых строк
+            [[ "$key" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "$key" ]] && continue
+            # Удаление пробелов вокруг ключа
+            key=$(echo "$key" | xargs)
+            # Удаление кавычек из значения
+            value="${value#\"}" ; value="${value%\"}"
+            value="${value#\'}" ; value="${value%\'}"
+            # Присваиваем только разрешённые переменные
+            if echo " $_allowed_vars " | grep -q " $key "; then
+                printf -v "$key" '%s' "$value"
+            else
+                log_warning "Игнорируется неизвестная переменная в конфиге: $key"
+            fi
+        done < "$config_file"
         NON_INTERACTIVE=true
     fi
 }
@@ -601,29 +617,33 @@ show_system_status() {
 
 # Главное меню (интерактивный режим)
 show_main_menu() {
-    print_separator '─'
-    echo -e "${WHITE}${BOLD}  Выберите действие:${NC}"
-    print_separator '─'
-    echo
-    echo -e "   ${CYAN}1)${NC} ${WHITE}🚀 Установить всё${NC}              ${GRAY}(полная установка)${NC}"
-    echo -e "   ${CYAN}2)${NC} ${WHITE}📦 Выборочная установка${NC}        ${GRAY}(выбрать компоненты)${NC}"
-    echo -e "   ${CYAN}3)${NC} ${WHITE}📋 Проверить статус${NC}            ${GRAY}(текущее состояние)${NC}"
-    echo -e "   ${CYAN}4)${NC} ${WHITE}🗑️  Удалить всё${NC}                ${GRAY}(полное удаление)${NC}"
-    echo -e "   ${CYAN}5)${NC} ${WHITE}❓ Справка${NC}                     ${GRAY}(--help)${NC}"
-    echo
-    print_separator '─'
-    echo
+    while true; do
+        print_separator '─'
+        echo -e "${WHITE}${BOLD}  Выберите действие:${NC}"
+        print_separator '─'
+        echo
+        echo -e "   ${CYAN}1)${NC} ${WHITE}🚀 Установить всё${NC}              ${GRAY}(полная установка)${NC}"
+        echo -e "   ${CYAN}2)${NC} ${WHITE}📦 Выборочная установка${NC}        ${GRAY}(выбрать компоненты)${NC}"
+        echo -e "   ${CYAN}3)${NC} ${WHITE}📋 Проверить статус${NC}            ${GRAY}(текущее состояние)${NC}"
+        echo -e "   ${CYAN}4)${NC} ${WHITE}🗑️  Удалить всё${NC}                ${GRAY}(полное удаление)${NC}"
+        echo -e "   ${CYAN}5)${NC} ${WHITE}❓ Справка${NC}                     ${GRAY}(--help)${NC}"
+        echo -e "   ${CYAN}0)${NC} ${WHITE}🚪 Выход${NC}"
+        echo
+        print_separator '─'
+        echo
 
-    local menu_choice
-    prompt_choice "Введите номер [1-5]: " 5 menu_choice
+        local menu_choice
+        prompt_choice "Введите номер [0-5]: " 5 menu_choice "0"
 
-    case "$menu_choice" in
-        1) run_full_install ;;
-        2) run_selective_install ;;
-        3) show_system_status; show_main_menu ;;
-        4) uninstall_all ;;
-        5) show_help; show_main_menu ;;
-    esac
+        case "$menu_choice" in
+            0) log_info "Выход."; exit 0 ;;
+            1) run_full_install; return ;;
+            2) run_selective_install; return ;;
+            3) show_system_status ;;
+            4) uninstall_all; return ;;
+            5) show_help ;;
+        esac
+    done
 }
 
 # Выборочная установка — выбор компонентов
@@ -713,13 +733,7 @@ run_selective_install() {
     fi
 
     # Автоопределение версий
-    local new_cadvisor new_node_exporter new_vmagent
-    new_cadvisor=$(fetch_latest_version "google/cadvisor" "$CADVISOR_VERSION")
-    new_node_exporter=$(fetch_latest_version "prometheus/node_exporter" "$NODE_EXPORTER_VERSION")
-    new_vmagent=$(fetch_latest_version "VictoriaMetrics/VictoriaMetrics" "$VMAGENT_VERSION")
-    [ -n "$new_cadvisor" ] && CADVISOR_VERSION="$new_cadvisor"
-    [ -n "$new_node_exporter" ] && NODE_EXPORTER_VERSION="$new_node_exporter"
-    [ -n "$new_vmagent" ] && VMAGENT_VERSION="$new_vmagent"
+    update_component_versions
 
     # Выполнение в фиксированном порядке зависимостей
     for c in 1 2 3 4 5 6 7 8; do
@@ -778,6 +792,57 @@ detect_os() {
     else
         log_error "Неподдерживаемая операционная система"
         exit 1
+    fi
+}
+
+# Определение архитектуры (формат: xray|prometheus|generic)
+# Использование: detect_arch xray → "64", detect_arch prometheus → "amd64"
+detect_arch() {
+    local format="${1:-generic}"
+    local arch
+    arch=$(uname -m)
+
+    case "$format" in
+        xray)
+            case "$arch" in
+                x86_64) echo "64" ;;
+                aarch64|arm64) echo "arm64-v8a" ;;
+                armv7l|armv6l) echo "arm32-v7a" ;;
+                *) log_error "Неподдерживаемая архитектура: $arch"; return 1 ;;
+            esac
+            ;;
+        prometheus|generic|*)
+            case "$arch" in
+                x86_64) echo "amd64" ;;
+                aarch64|arm64) echo "arm64" ;;
+                armv7l|armv6l) echo "armv7" ;;
+                *) log_error "Неподдерживаемая архитектура: $arch"; return 1 ;;
+            esac
+            ;;
+    esac
+}
+
+# Обновление версий компонентов через GitHub API
+update_component_versions() {
+    log_info "Проверка актуальных версий компонентов..."
+    local new_ver
+
+    new_ver=$(fetch_latest_version "google/cadvisor" "$CADVISOR_VERSION")
+    if [ -n "$new_ver" ]; then
+        [ "$new_ver" != "$CADVISOR_VERSION" ] && log_info "cAdvisor: v$new_ver (обновлено)"
+        CADVISOR_VERSION="$new_ver"
+    fi
+
+    new_ver=$(fetch_latest_version "prometheus/node_exporter" "$NODE_EXPORTER_VERSION")
+    if [ -n "$new_ver" ]; then
+        [ "$new_ver" != "$NODE_EXPORTER_VERSION" ] && log_info "Node Exporter: v$new_ver (обновлено)"
+        NODE_EXPORTER_VERSION="$new_ver"
+    fi
+
+    new_ver=$(fetch_latest_version "VictoriaMetrics/VictoriaMetrics" "$VMAGENT_VERSION")
+    if [ -n "$new_ver" ]; then
+        [ "$new_ver" != "$VMAGENT_VERSION" ] && log_info "VM Agent: v$new_ver (обновлено)"
+        VMAGENT_VERSION="$new_ver"
     fi
 }
 
@@ -1237,8 +1302,7 @@ setup_ufw() {
 
     log_info "Настройка правил UFW..."
 
-    # Сброс и базовые политики
-    ufw --force reset >/dev/null 2>&1
+    # Базовые политики (без сброса существующих правил)
     ufw default deny incoming >/dev/null 2>&1
     ufw default allow outgoing >/dev/null 2>&1
     log_success "Политика: deny incoming, allow outgoing"
@@ -1552,6 +1616,7 @@ install_remnanode() {
     else
         echo
         echo -e "${CYAN}📝 Введите SECRET_KEY из Remnawave-Panel${NC}"
+        echo -e "${GRAY}   Где найти: Remnawave Panel → Nodes → Add Node → скопировать ключ${NC}"
         echo -e "${GRAY}   Вставьте содержимое и нажмите ENTER на новой строке для завершения${NC}"
         echo -e "${GRAY}   (или введите 'cancel' для отмены):${NC}"
         SECRET_KEY_VALUE=""
@@ -1570,7 +1635,8 @@ install_remnanode() {
 
     if [ -z "$SECRET_KEY_VALUE" ]; then
         log_error "SECRET_KEY не может быть пустым!"
-        exit 1
+        STATUS_REMNANODE="ошибка"
+        return 1
     fi
 
     # Запрос порта
@@ -1582,11 +1648,16 @@ install_remnanode() {
         NODE_PORT=${NODE_PORT:-3000}
     fi
 
-    # Валидация порта
-    if ! [[ "$NODE_PORT" =~ ^[0-9]+$ ]] || [ "$NODE_PORT" -lt 1 ] || [ "$NODE_PORT" -gt 65535 ]; then
-        log_error "Неверный номер порта"
-        exit 1
-    fi
+    # Валидация порта (с повторным вводом)
+    while ! [[ "$NODE_PORT" =~ ^[0-9]+$ ]] || [ "$NODE_PORT" -lt 1 ] || [ "$NODE_PORT" -gt 65535 ]; do
+        log_warning "Неверный номер порта: $NODE_PORT (допустимо 1-65535)"
+        if [ "${NON_INTERACTIVE:-false}" = true ]; then
+            STATUS_REMNANODE="ошибка"
+            return 1
+        fi
+        read -p "Введите NODE_PORT (по умолчанию 3000): " -r NODE_PORT
+        NODE_PORT=${NODE_PORT:-3000}
+    done
     DETAIL_REMNANODE_PORT="$NODE_PORT"
 
     # Запрос установки Xray-core
@@ -1671,7 +1742,7 @@ EOF
     
     # Запуск контейнера
     log_info "Запуск RemnawaveNode..."
-    cd "$REMNANODE_DIR" && docker compose up -d; cd - > /dev/null
+    docker compose --project-directory "$REMNANODE_DIR" up -d
 
     # Проверка что контейнер поднялся (с ожиданием до 30 сек)
     log_info "Ожидание запуска контейнера..."
@@ -1688,23 +1759,10 @@ EOF
 # Установка Xray-core
 install_xray_core() {
     log_info "Установка Xray-core..."
-    
+
     # Определение архитектуры
     local ARCH
-    ARCH=$(uname -m)
-    log_info "Обнаружена архитектура: $ARCH"
-
-    case "$ARCH" in
-        x86_64) ARCH="64" ;;
-        aarch64|arm64) ARCH="arm64-v8a" ;;
-        armv7l|armv6l) ARCH="arm32-v7a" ;;
-        *)
-            log_error "Неподдерживаемая архитектура: $ARCH"
-            log_error "Поддерживаемые архитектуры: x86_64, aarch64, arm64, armv7l, armv6l"
-            return 1
-            ;;
-    esac
-
+    ARCH=$(detect_arch xray) || return 1
     log_info "Используется архитектура для Xray: $ARCH"
     
     # Установка unzip если нужно
@@ -2200,9 +2258,9 @@ install_caddy_selfsteal() {
         # Проверяем оригинальный домен, не wildcard
         if ! validate_domain_dns "$original_domain" "$NODE_IP"; then
             echo
-            read -p "Продолжить установку? [Y/n]: " -r continue_install
-            if [[ $continue_install =~ ^[Nn]$ ]]; then
-                exit 1
+            if ! prompt_yn "Продолжить установку? (y/n): " "y"; then
+                STATUS_CADDY="ошибка"
+                return 1
             fi
         fi
     fi
@@ -2217,11 +2275,16 @@ install_caddy_selfsteal() {
     fi
     local port="${input_port:-$DEFAULT_PORT}"
     
-    # Валидация порта
-    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
-        log_error "Неверный номер порта"
-        exit 1
-    fi
+    # Валидация порта (с повторным вводом)
+    while ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; do
+        log_warning "Неверный номер порта: $port (допустимо 1-65535)"
+        if [ "${NON_INTERACTIVE:-false}" = true ]; then
+            STATUS_CADDY="ошибка"
+            return 1
+        fi
+        read -p "Введите HTTPS порт (по умолчанию $DEFAULT_PORT): " input_port
+        port="${input_port:-$DEFAULT_PORT}"
+    done
     DETAIL_CADDY_PORT="$port"
 
     # Создание .env файла
@@ -2406,15 +2469,9 @@ EOF
     
     log_success "Caddyfile создан"
     
-    # Загрузка случайного шаблона
+    # Выбор и загрузка шаблона
     echo
-    log_info "Загрузка шаблона..."
-    local templates=("1:10gag" "2:503-1" "3:503-2" "4:convertit" "5:converter" "6:downloader" "7:filecloud" "8:games-site" "9:modmanager" "10:speedtest" "11:YouTube")
-    local random_template=${templates[$RANDOM % ${#templates[@]}]}
-    local template_id=$(echo "$random_template" | cut -d: -f1)
-    local template_folder=$(echo "$random_template" | cut -d: -f2)
-    
-    download_template "$template_folder" "Template $template_id" || true
+    select_and_download_template || true
     
     # Проверка занятости портов перед запуском
     log_info "Проверка доступности портов..."
@@ -2442,7 +2499,7 @@ EOF
 
     # Запуск Caddy
     log_info "Запуск Caddy..."
-    cd "$CADDY_DIR" && docker compose up -d; cd - > /dev/null
+    docker compose --project-directory "$CADDY_DIR" up -d
 
     # Проверка что контейнер поднялся (с ожиданием до 30 сек)
     log_info "Ожидание запуска контейнера..."
@@ -2705,21 +2762,10 @@ install_grafana_monitoring() {
     fi
     
     log_info "Установка компонентов мониторинга..."
-    
+
     # Определение архитектуры
     local ARCH
-    ARCH=$(uname -m)
-    case "$ARCH" in
-        x86_64) ARCH="amd64" ;;
-        aarch64|arm64) ARCH="arm64" ;;
-        armv7l|armv6l) ARCH="armv7" ;;
-        *)
-            log_error "Неподдерживаемая архитектура: $ARCH"
-            log_error "Поддерживаемые архитектуры: x86_64, aarch64, arm64, armv7l, armv6l"
-            return 1
-            ;;
-    esac
-
+    ARCH=$(detect_arch prometheus) || return 1
     log_info "Обнаружена архитектура: $ARCH"
     
     # Создание директорий
@@ -3183,28 +3229,11 @@ run_full_install() {
     echo
 
     # Автоопределение последних версий компонентов
-    log_info "Проверка актуальных версий компонентов..."
-    local new_cadvisor new_node_exporter new_vmagent
-    new_cadvisor=$(fetch_latest_version "google/cadvisor" "$CADVISOR_VERSION")
-    new_node_exporter=$(fetch_latest_version "prometheus/node_exporter" "$NODE_EXPORTER_VERSION")
-    new_vmagent=$(fetch_latest_version "VictoriaMetrics/VictoriaMetrics" "$VMAGENT_VERSION")
-
-    # Обновляем версии если получены более новые
-    if [ -n "$new_cadvisor" ] && [ "$new_cadvisor" != "$CADVISOR_VERSION" ]; then
-        CADVISOR_VERSION="$new_cadvisor"
-        log_info "cAdvisor: v$CADVISOR_VERSION (обновлено)"
-    fi
-    if [ -n "$new_node_exporter" ] && [ "$new_node_exporter" != "$NODE_EXPORTER_VERSION" ]; then
-        NODE_EXPORTER_VERSION="$new_node_exporter"
-        log_info "Node Exporter: v$NODE_EXPORTER_VERSION (обновлено)"
-    fi
-    if [ -n "$new_vmagent" ] && [ "$new_vmagent" != "$VMAGENT_VERSION" ]; then
-        VMAGENT_VERSION="$new_vmagent"
-        log_info "VM Agent: v$VMAGENT_VERSION (обновлено)"
-    fi
+    update_component_versions
     echo
 
-    # Применение сетевых настроек (BBR, TCP tuning, лимиты)
+    # [1/8] Применение сетевых настроек (BBR, TCP tuning, лимиты)
+    echo -e "${BOLD}[1/8] Сетевые настройки${NC}"
     apply_network_settings
 
     echo
@@ -3250,50 +3279,48 @@ run_full_install() {
     fi
     echo
 
-    # Установка Docker
+    # [2/8] Установка Docker
+    echo -e "${BOLD}[2/8] Docker${NC}"
     if ! install_docker; then
         log_error "Не удалось установить или запустить Docker"
         STATUS_DOCKER="ошибка"
         exit 1
     fi
     STATUS_DOCKER="установлен"
-
-    # Проверка Docker Compose
     check_docker_compose
-
     echo
 
-    # Установка RemnawaveNode
+    # [3/8] Установка RemnawaveNode
+    echo -e "${BOLD}[3/8] RemnawaveNode${NC}"
     install_remnanode
-
     echo
 
-    # Установка Caddy Selfsteal
+    # [4/8] Установка Caddy Selfsteal
+    echo -e "${BOLD}[4/8] Caddy Selfsteal${NC}"
     install_caddy_selfsteal
-
     echo
 
-    # Настройка UFW файервола
+    # [5/8] Настройка UFW файервола
+    echo -e "${BOLD}[5/8] UFW Firewall${NC}"
     setup_ufw
-
     echo
 
-    # Установка Fail2ban
+    # [6/8] Установка Fail2ban
+    echo -e "${BOLD}[6/8] Fail2ban${NC}"
     install_fail2ban
-
     echo
 
-    # Установка Netbird
+    # [7/8] Установка Netbird
+    echo -e "${BOLD}[7/8] Netbird VPN${NC}"
     install_netbird
-
     echo
 
-    # Установка мониторинга Grafana
+    # [8/8] Установка мониторинга Grafana
+    echo -e "${BOLD}[8/8] Мониторинг Grafana${NC}"
     install_grafana_monitoring
-
     echo
 
-    # Восстановление автоматических обновлений (также вызывается автоматически из _cleanup_on_exit)
+    # Восстановление автоматических обновлений
     restore_auto_updates
     _RESTORE_AUTO_UPDATES=false
 
@@ -3332,12 +3359,22 @@ show_help() {
     print_header "Remnawave Node Installer v${SCRIPT_VERSION}" "🚀"
     echo -e "${WHITE}Использование:${NC} $(basename "$0") ${CYAN}[ОПЦИЯ]${NC}"
     echo
-    echo -e "${WHITE}Опции:${NC}"
-    echo -e "  ${CYAN}--help${NC}          Показать эту справку"
-    echo -e "  ${CYAN}--status${NC}        Показать статус системы"
-    echo -e "  ${CYAN}--uninstall${NC}     Удалить все компоненты"
-    echo -e "  ${CYAN}--config FILE${NC}   Использовать конфиг-файл (non-interactive режим)"
-    echo -e "  ${GRAY}(без опций)${NC}     Показать главное меню"
+    echo -e "${WHITE}Команды установки:${NC}"
+    echo -e "  ${GRAY}(без опций)${NC}            Показать главное меню"
+    echo -e "  ${CYAN}--config FILE${NC}          Non-interactive установка с конфиг-файлом"
+    echo
+    echo -e "${WHITE}Управление:${NC}"
+    echo -e "  ${CYAN}--status${NC}               Показать статус всех компонентов"
+    echo -e "  ${CYAN}--update${NC}               Обновить компоненты до последних версий"
+    echo -e "  ${CYAN}--change-template${NC}      Сменить HTML шаблон маскировки"
+    echo -e "  ${CYAN}--diagnose${NC}             Диагностика: проверка всех компонентов"
+    echo -e "  ${CYAN}--uninstall${NC}            Удалить все компоненты"
+    echo
+    echo -e "${WHITE}Утилиты:${NC}"
+    echo -e "  ${CYAN}--self-update${NC}          Обновить сам скрипт до последней версии"
+    echo -e "  ${CYAN}--export-config${NC}        Экспорт текущей конфигурации в файл"
+    echo -e "  ${CYAN}--dry-run${NC}              Показать план установки без выполнения"
+    echo -e "  ${CYAN}--help${NC}                 Показать эту справку"
     echo
     echo -e "${WHITE}Компоненты:${NC}"
     echo -e "  ${GREEN}●${NC} RemnawaveNode (Docker)     → ${GRAY}$REMNANODE_DIR${NC}"
@@ -3364,6 +3401,641 @@ show_help() {
     echo -e "  ${CYAN}CONFIG_FILE=/path${NC}   ${GRAY}# Путь к конфиг-файлу${NC}"
     echo
     echo -e "${GRAY}Лог установки: $INSTALL_LOG${NC}"
+    echo
+}
+
+# ═══════════════════════════════════════════════════════════════════
+#  Список доступных SNI шаблонов
+# ═══════════════════════════════════════════════════════════════════
+TEMPLATES=(
+    "10gag:Сайт мемов (10gag)"
+    "503-1:Страница ошибки 503 (v1)"
+    "503-2:Страница ошибки 503 (v2)"
+    "convertit:Конвертер файлов (Convertit)"
+    "converter:Видеостудия-конвертер"
+    "downloader:Даунлоадер"
+    "filecloud:Облачное хранилище"
+    "games-site:Ретро игровой портал"
+    "modmanager:Мод-менеджер для игр"
+    "speedtest:Спидтест"
+    "YouTube:Видеохостинг с капчей"
+)
+
+# Интерактивный выбор шаблона + загрузка
+select_and_download_template() {
+    local target_dir="${1:-$CADDY_HTML_DIR}"
+
+    echo -e "${WHITE}🎨 Выбор HTML шаблона для маскировки:${NC}"
+    echo
+    local i=1
+    for entry in "${TEMPLATES[@]}"; do
+        local folder="${entry%%:*}"
+        local label="${entry#*:}"
+        printf "   ${CYAN}%2d)${NC} %s\n" "$i" "$label"
+        i=$((i + 1))
+    done
+    printf "   ${CYAN}%2d)${NC} ${YELLOW}Случайный шаблон${NC}\n" "$i"
+    echo
+
+    local tmpl_choice
+    if [ "${NON_INTERACTIVE:-false}" = true ]; then
+        tmpl_choice=$i  # случайный в non-interactive
+    else
+        prompt_choice "Выберите шаблон [1-$i]: " "$i" tmpl_choice "$i"
+    fi
+
+    local template_folder
+    if [ "$tmpl_choice" -eq "$i" ]; then
+        # Случайный
+        local random_entry="${TEMPLATES[$RANDOM % ${#TEMPLATES[@]}]}"
+        template_folder="${random_entry%%:*}"
+        local template_label="${random_entry#*:}"
+        log_info "Случайный выбор: $template_label"
+    else
+        local idx=$((tmpl_choice - 1))
+        local entry="${TEMPLATES[$idx]}"
+        template_folder="${entry%%:*}"
+    fi
+
+    download_template "$template_folder" "$template_folder"
+}
+
+# Смена шаблона на существующей установке
+change_template() {
+    check_root
+
+    if [ ! -d "$CADDY_HTML_DIR" ]; then
+        log_error "Caddy не установлен ($CADDY_HTML_DIR не найден)"
+        exit 1
+    fi
+
+    print_header "Смена HTML шаблона" "🎨"
+    echo -e "${GRAY}  Текущий шаблон: $CADDY_HTML_DIR${NC}"
+    echo
+
+    select_and_download_template "$CADDY_HTML_DIR"
+
+    # Перезапуск Caddy не требуется — он отдаёт статические файлы
+    log_success "Шаблон обновлён. Перезапуск Caddy не требуется."
+}
+
+# ═══════════════════════════════════════════════════════════════════
+#  --update: обновление компонентов без изменения конфигов
+# ═══════════════════════════════════════════════════════════════════
+update_components() {
+    check_root
+    NODE_IP=$(get_server_ip)
+    detect_os
+    detect_package_manager
+
+    print_header "Обновление компонентов" "🔄"
+
+    echo -e "${WHITE}Что обновить?${NC}"
+    echo
+    echo -e "   ${CYAN}1)${NC} Всё"
+    echo -e "   ${CYAN}2)${NC} RemnawaveNode (docker pull)"
+    echo -e "   ${CYAN}3)${NC} Xray-core (последняя версия)"
+    echo -e "   ${CYAN}4)${NC} Caddy (docker pull)"
+    echo -e "   ${CYAN}5)${NC} Мониторинг (cadvisor, node_exporter, vmagent)"
+    echo
+
+    local upd_choice
+    prompt_choice "Выберите [1-5]: " 5 upd_choice
+
+    case "$upd_choice" in
+        1)
+            _update_remnanode
+            _update_xray
+            _update_caddy
+            _update_monitoring
+            ;;
+        2) _update_remnanode ;;
+        3) _update_xray ;;
+        4) _update_caddy ;;
+        5) _update_monitoring ;;
+    esac
+
+    echo
+    log_success "Обновление завершено."
+}
+
+_update_remnanode() {
+    if [ ! -f "$REMNANODE_DIR/docker-compose.yml" ]; then
+        log_warning "RemnawaveNode не установлен — пропуск"
+        return 0
+    fi
+    log_info "Обновление RemnawaveNode..."
+    docker compose --project-directory "$REMNANODE_DIR" pull
+    docker compose --project-directory "$REMNANODE_DIR" up -d
+    log_success "RemnawaveNode обновлён"
+}
+
+_update_xray() {
+    if [ ! -d "$REMNANODE_DATA_DIR" ]; then
+        log_warning "Xray-core не установлен — пропуск"
+        return 0
+    fi
+    log_info "Обновление Xray-core..."
+    if install_xray_core; then
+        # Перезапуск ноды чтобы подхватить новый бинарник
+        if [ -f "$REMNANODE_DIR/docker-compose.yml" ]; then
+            docker compose --project-directory "$REMNANODE_DIR" restart
+        fi
+        log_success "Xray-core обновлён"
+    else
+        log_error "Не удалось обновить Xray-core"
+    fi
+}
+
+_update_caddy() {
+    if [ ! -f "$CADDY_DIR/docker-compose.yml" ]; then
+        log_warning "Caddy не установлен — пропуск"
+        return 0
+    fi
+    log_info "Обновление Caddy..."
+    docker compose --project-directory "$CADDY_DIR" pull
+    docker compose --project-directory "$CADDY_DIR" up -d
+    log_success "Caddy обновлён"
+}
+
+_update_monitoring() {
+    if [ ! -d "/opt/monitoring" ]; then
+        log_warning "Мониторинг не установлен — пропуск"
+        return 0
+    fi
+    log_info "Обновление компонентов мониторинга..."
+
+    update_component_versions
+    local ARCH
+    ARCH=$(detect_arch prometheus) || return 1
+
+    # Останавливаем службы
+    systemctl stop cadvisor nodeexporter vmagent 2>/dev/null || true
+
+    # cAdvisor
+    log_info "Обновление cAdvisor v${CADVISOR_VERSION}..."
+    local cadvisor_url="https://github.com/google/cadvisor/releases/download/v${CADVISOR_VERSION}/cadvisor-v${CADVISOR_VERSION}-linux-${ARCH}"
+    if download_with_progress "$cadvisor_url" "/opt/monitoring/cadvisor/cadvisor" "Скачивание cAdvisor..."; then
+        chmod +x /opt/monitoring/cadvisor/cadvisor
+        log_success "cAdvisor обновлён"
+    else
+        log_error "Не удалось обновить cAdvisor"
+    fi
+
+    # Node Exporter
+    log_info "Обновление Node Exporter v${NODE_EXPORTER_VERSION}..."
+    local ne_dir="/opt/monitoring/nodeexporter"
+    local ne_url="https://github.com/prometheus/node_exporter/releases/download/v${NODE_EXPORTER_VERSION}/node_exporter-${NODE_EXPORTER_VERSION}.linux-${ARCH}.tar.gz"
+    if download_with_progress "$ne_url" "${ne_dir}/node_exporter.tar.gz" "Скачивание Node Exporter..."; then
+        tar -xzf "${ne_dir}/node_exporter.tar.gz" -C "${ne_dir}"
+        mv "${ne_dir}/node_exporter-${NODE_EXPORTER_VERSION}.linux-${ARCH}/node_exporter" "${ne_dir}/" 2>/dev/null || true
+        chmod +x "${ne_dir}/node_exporter"
+        rm -rf "${ne_dir}/node_exporter-${NODE_EXPORTER_VERSION}.linux-${ARCH}" "${ne_dir}/node_exporter.tar.gz"
+        log_success "Node Exporter обновлён"
+    else
+        log_error "Не удалось обновить Node Exporter"
+    fi
+
+    # VictoriaMetrics Agent
+    log_info "Обновление VM Agent v${VMAGENT_VERSION}..."
+    local vm_dir="/opt/monitoring/vmagent"
+    local vm_url="https://github.com/VictoriaMetrics/VictoriaMetrics/releases/download/v${VMAGENT_VERSION}/vmutils-linux-${ARCH}-v${VMAGENT_VERSION}.tar.gz"
+    if download_with_progress "$vm_url" "${vm_dir}/vmagent.tar.gz" "Скачивание VM Agent..."; then
+        tar -xzf "${vm_dir}/vmagent.tar.gz" -C "${vm_dir}"
+        mv "${vm_dir}/vmagent-prod" "${vm_dir}/vmagent" 2>/dev/null || true
+        rm -f "${vm_dir}/vmagent.tar.gz" "${vm_dir}/vmalert-prod" "${vm_dir}/vmauth-prod" "${vm_dir}/vmbackup-prod" "${vm_dir}/vmrestore-prod" "${vm_dir}/vmctl-prod"
+        chmod +x "${vm_dir}/vmagent"
+        log_success "VM Agent обновлён"
+    else
+        log_error "Не удалось обновить VM Agent"
+    fi
+
+    # Запуск служб
+    systemctl start cadvisor nodeexporter vmagent 2>/dev/null || true
+    log_success "Мониторинг обновлён"
+}
+
+# ═══════════════════════════════════════════════════════════════════
+#  --diagnose: диагностика всех компонентов
+# ═══════════════════════════════════════════════════════════════════
+run_diagnose() {
+    check_root
+    NODE_IP=$(get_server_ip)
+    detect_os
+    detect_package_manager
+
+    print_header "Диагностика системы" "🩺"
+
+    local issues=0
+
+    # 1. Система
+    echo -e "${WHITE}[1/7] Система${NC}"
+    local disk_free_mb
+    disk_free_mb=$(df -m /opt 2>/dev/null | awk 'NR==2 {print $4}')
+    if [ -n "$disk_free_mb" ] && [ "$disk_free_mb" -lt 500 ]; then
+        log_warning "Мало места на диске: ${disk_free_mb} МБ (рекомендуется > 500 МБ)"
+        issues=$((issues + 1))
+    else
+        log_success "Диск: ${disk_free_mb:-?} МБ свободно"
+    fi
+
+    local ram_avail
+    ram_avail=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}')
+    if [ -n "$ram_avail" ] && [ "$ram_avail" -lt 256 ]; then
+        log_warning "Мало свободной RAM: ${ram_avail} МБ"
+        issues=$((issues + 1))
+    else
+        log_success "RAM: ${ram_avail:-?} МБ доступно"
+    fi
+    echo
+
+    # 2. Docker
+    echo -e "${WHITE}[2/7] Docker${NC}"
+    if command -v docker >/dev/null 2>&1; then
+        if docker ps >/dev/null 2>&1; then
+            log_success "Docker работает: $(docker --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1)"
+        else
+            log_error "Docker установлен, но не отвечает"
+            issues=$((issues + 1))
+        fi
+    else
+        log_error "Docker не установлен"
+        issues=$((issues + 1))
+    fi
+    echo
+
+    # 3. RemnawaveNode
+    echo -e "${WHITE}[3/7] RemnawaveNode${NC}"
+    if [ -f "$REMNANODE_DIR/docker-compose.yml" ]; then
+        if docker compose --project-directory "$REMNANODE_DIR" ps 2>/dev/null | grep -qE "Up|running"; then
+            log_success "RemnawaveNode запущен"
+            # Проверка подключения к панели
+            local node_port
+            node_port=$(grep "^NODE_PORT=" "$REMNANODE_DIR/.env" 2>/dev/null | cut -d= -f2)
+            if [ -n "$node_port" ]; then
+                if ss -tlnp 2>/dev/null | grep -q ":${node_port} "; then
+                    log_success "Порт $node_port прослушивается"
+                else
+                    log_warning "Порт $node_port не прослушивается (контейнер может стартовать)"
+                fi
+            fi
+        else
+            log_error "RemnawaveNode установлен, но не запущен"
+            log_info "Последние логи:"
+            docker compose --project-directory "$REMNANODE_DIR" logs --tail 5 2>/dev/null || true
+            issues=$((issues + 1))
+        fi
+    else
+        log_info "RemnawaveNode не установлен"
+    fi
+    echo
+
+    # 4. Caddy
+    echo -e "${WHITE}[4/7] Caddy Selfsteal${NC}"
+    if [ -f "$CADDY_DIR/docker-compose.yml" ]; then
+        if docker compose --project-directory "$CADDY_DIR" ps 2>/dev/null | grep -qE "Up|running"; then
+            log_success "Caddy запущен"
+            # Проверка порта
+            local caddy_port
+            caddy_port=$(grep "^SELF_STEAL_PORT=" "$CADDY_DIR/.env" 2>/dev/null | cut -d= -f2)
+            if [ -n "$caddy_port" ]; then
+                if ss -tlnp 2>/dev/null | grep -q ":${caddy_port} "; then
+                    log_success "HTTPS порт $caddy_port прослушивается"
+                else
+                    log_warning "HTTPS порт $caddy_port не прослушивается"
+                    issues=$((issues + 1))
+                fi
+            fi
+            # Проверка сертификата
+            local caddy_domain
+            caddy_domain=$(grep "^SELF_STEAL_DOMAIN=" "$CADDY_DIR/.env" 2>/dev/null | cut -d= -f2)
+            if [ -n "$caddy_domain" ]; then
+                log_info "Домен: $caddy_domain"
+            fi
+        else
+            log_error "Caddy установлен, но не запущен"
+            log_info "Последние логи:"
+            docker compose --project-directory "$CADDY_DIR" logs --tail 5 2>/dev/null || true
+            issues=$((issues + 1))
+        fi
+    else
+        log_info "Caddy не установлен"
+    fi
+    echo
+
+    # 5. UFW / Fail2ban
+    echo -e "${WHITE}[5/7] Безопасность${NC}"
+    if command -v ufw >/dev/null 2>&1; then
+        if ufw status 2>/dev/null | grep -qi "active"; then
+            local rule_count
+            rule_count=$(ufw status 2>/dev/null | grep -c "ALLOW\|DENY\|REJECT" || echo 0)
+            log_success "UFW активен ($rule_count правил)"
+        else
+            log_warning "UFW установлен, но неактивен"
+            issues=$((issues + 1))
+        fi
+    else
+        log_info "UFW не установлен"
+    fi
+    if command -v fail2ban-client >/dev/null 2>&1; then
+        if systemctl is-active --quiet fail2ban 2>/dev/null; then
+            local jail_count
+            jail_count=$(fail2ban-client status 2>/dev/null | grep -oP '\d+' | tail -1 || echo "?")
+            log_success "Fail2ban активен ($jail_count jail'ов)"
+        else
+            log_warning "Fail2ban установлен, но не запущен"
+            issues=$((issues + 1))
+        fi
+    else
+        log_info "Fail2ban не установлен"
+    fi
+    echo
+
+    # 6. Netbird
+    echo -e "${WHITE}[6/7] Netbird VPN${NC}"
+    if command -v netbird >/dev/null 2>&1; then
+        if netbird status 2>/dev/null | grep -qi "connected"; then
+            local nb_ip
+            nb_ip=$(ip addr show wt0 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d/ -f1 || echo "?")
+            log_success "Netbird подключен (IP: $nb_ip)"
+        else
+            log_warning "Netbird установлен, но не подключен"
+            issues=$((issues + 1))
+        fi
+    else
+        log_info "Netbird не установлен"
+    fi
+    echo
+
+    # 7. Мониторинг
+    echo -e "${WHITE}[7/7] Мониторинг${NC}"
+    local mon_ok=0 mon_total=0
+    for svc in cadvisor nodeexporter vmagent; do
+        if systemctl is-active --quiet "$svc" 2>/dev/null; then
+            log_success "$svc запущен"
+            mon_ok=$((mon_ok + 1))
+        elif [ -f "/etc/systemd/system/${svc}.service" ]; then
+            log_error "$svc не запущен"
+            issues=$((issues + 1))
+        fi
+        mon_total=$((mon_total + 1))
+    done
+    if [ $mon_ok -eq 0 ] && [ ! -d "/opt/monitoring" ]; then
+        log_info "Мониторинг не установлен"
+    fi
+    echo
+
+    # Итог
+    print_separator '═'
+    if [ $issues -eq 0 ]; then
+        echo -e "${GREEN}${BOLD}  ✅ Все проверки пройдены. Проблем не обнаружено.${NC}"
+    else
+        echo -e "${YELLOW}${BOLD}  ⚠️  Обнаружено проблем: $issues${NC}"
+    fi
+    echo -e "${GRAY}  Сервер: $NODE_IP | ОС: $(awk -F= '/^PRETTY_NAME=/{gsub(/"/, "", $2); print $2}' /etc/os-release 2>/dev/null)${NC}"
+    print_separator '═'
+    echo
+}
+
+# ═══════════════════════════════════════════════════════════════════
+#  --self-update: обновление самого скрипта
+# ═══════════════════════════════════════════════════════════════════
+self_update() {
+    local script_url="https://raw.githubusercontent.com/Case211/remnanode-install/refs/heads/main/remnanode-install.sh"
+    local script_path
+    script_path=$(readlink -f "$0" 2>/dev/null || echo "$0")
+
+    log_info "Проверка обновлений скрипта..."
+
+    # Получаем версию с GitHub
+    local remote_version
+    remote_version=$(curl -fsSL --connect-timeout 10 "$script_url" 2>/dev/null | grep -oP 'SCRIPT_VERSION="\K[^"]+' | head -1)
+
+    if [ -z "$remote_version" ]; then
+        log_error "Не удалось получить версию с GitHub"
+        return 1
+    fi
+
+    if [ "$remote_version" = "$SCRIPT_VERSION" ]; then
+        log_success "Установлена последняя версия: v${SCRIPT_VERSION}"
+        return 0
+    fi
+
+    log_info "Доступна новая версия: v${remote_version} (текущая: v${SCRIPT_VERSION})"
+
+    if ! prompt_yn "Обновить скрипт? (y/n): " "y"; then
+        log_info "Обновление отменено"
+        return 0
+    fi
+
+    # Скачиваем новую версию
+    local tmp_script
+    tmp_script=$(mktemp)
+    if curl -fsSL "$script_url" -o "$tmp_script" 2>/dev/null; then
+        chmod +x "$tmp_script"
+        # Проверяем что скачанный файл валиден
+        if head -1 "$tmp_script" | grep -q "^#!/"; then
+            cp "$tmp_script" "$script_path"
+            rm -f "$tmp_script"
+            log_success "Скрипт обновлён до v${remote_version}"
+            log_info "Перезапустите скрипт для использования новой версии"
+        else
+            rm -f "$tmp_script"
+            log_error "Скачанный файл невалиден"
+            return 1
+        fi
+    else
+        rm -f "$tmp_script"
+        log_error "Не удалось скачать обновление"
+        return 1
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════════
+#  --dry-run: показать план без выполнения
+# ═══════════════════════════════════════════════════════════════════
+dry_run() {
+    check_root
+    NODE_IP=$(get_server_ip)
+    detect_os
+    detect_package_manager
+
+    print_header "Dry Run — план установки" "📋"
+
+    echo -e "${GRAY}  Этот режим показывает что будет сделано при полной установке,${NC}"
+    echo -e "${GRAY}  без фактических изменений в системе.${NC}"
+    echo
+
+    echo -e "${WHITE}ОС:${NC}          $(awk -F= '/^PRETTY_NAME=/{gsub(/"/, "", $2); print $2}' /etc/os-release 2>/dev/null)"
+    echo -e "${WHITE}IP:${NC}          $NODE_IP"
+    echo -e "${WHITE}Архитектура:${NC} $(uname -m)"
+    echo -e "${WHITE}Ядро:${NC}        $(uname -r)"
+    echo
+
+    print_separator '─'
+    echo -e "${WHITE}${BOLD}  Компоненты для установки:${NC}"
+    print_separator '─'
+    echo
+
+    # Сетевые настройки
+    local bbr_status="BBR1"
+    if grep -q "bbr3" /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+        bbr_status="BBR3"
+    elif grep -q "bbr2" /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+        bbr_status="BBR2"
+    fi
+    echo -e "  ${CYAN}1.${NC} Сетевые настройки — $bbr_status, TCP tuning, лимиты"
+
+    # Docker
+    if command -v docker >/dev/null 2>&1; then
+        echo -e "  ${CYAN}2.${NC} Docker — ${GREEN}уже установлен${NC}"
+    else
+        echo -e "  ${CYAN}2.${NC} Docker — будет установлен"
+    fi
+
+    # RemnawaveNode
+    if check_existing_remnanode 2>/dev/null; then
+        echo -e "  ${CYAN}3.${NC} RemnawaveNode — ${GREEN}уже установлен${NC} (спросит: пропустить/перезаписать)"
+    else
+        echo -e "  ${CYAN}3.${NC} RemnawaveNode — будет установлен в $REMNANODE_DIR"
+    fi
+
+    # Caddy
+    if check_existing_caddy 2>/dev/null; then
+        echo -e "  ${CYAN}4.${NC} Caddy Selfsteal — ${GREEN}уже установлен${NC} (спросит: пропустить/перезаписать)"
+    else
+        echo -e "  ${CYAN}4.${NC} Caddy Selfsteal — будет установлен в $CADDY_DIR"
+    fi
+
+    # UFW
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "active"; then
+        echo -e "  ${CYAN}5.${NC} UFW Firewall — ${GREEN}уже активен${NC}"
+    else
+        echo -e "  ${CYAN}5.${NC} UFW Firewall — будет настроен (deny all + whitelist 22, 80, 443)"
+    fi
+
+    # Fail2ban
+    if command -v fail2ban-client >/dev/null 2>&1; then
+        echo -e "  ${CYAN}6.${NC} Fail2ban — ${GREEN}уже установлен${NC}"
+    else
+        echo -e "  ${CYAN}6.${NC} Fail2ban — будет установлен (SSH + Caddy + portscan jails)"
+    fi
+
+    # Netbird
+    echo -e "  ${CYAN}7.${NC} Netbird VPN — опционально (потребуется Setup Key)"
+
+    # Мониторинг
+    if check_existing_monitoring 2>/dev/null; then
+        echo -e "  ${CYAN}8.${NC} Мониторинг — ${GREEN}уже установлен${NC}"
+    else
+        echo -e "  ${CYAN}8.${NC} Мониторинг — опционально (cadvisor + node_exporter + vmagent)"
+    fi
+
+    echo
+    print_separator '─'
+    echo -e "${WHITE}${BOLD}  Файлы и директории:${NC}"
+    print_separator '─'
+    echo
+    echo -e "  ${GRAY}/opt/remnanode/${NC}             — конфиг и compose ноды"
+    echo -e "  ${GRAY}/var/lib/remnanode/${NC}         — бинарники Xray-core"
+    echo -e "  ${GRAY}/opt/caddy/${NC}                 — Caddy + HTML шаблоны"
+    echo -e "  ${GRAY}/opt/monitoring/${NC}            — бинарники мониторинга"
+    echo -e "  ${GRAY}/etc/sysctl.d/99-remnawave*${NC} — сетевые настройки"
+    echo -e "  ${GRAY}/etc/fail2ban/jail.local${NC}    — конфиг Fail2ban"
+    echo -e "  ${GRAY}/var/log/remnanode-install.log${NC} — лог установки"
+    echo
+
+    log_info "Для запуска установки выполните: $0"
+}
+
+# ═══════════════════════════════════════════════════════════════════
+#  --export-config: экспорт текущей конфигурации в файл
+# ═══════════════════════════════════════════════════════════════════
+export_config() {
+    check_root
+
+    local output="${1:-/etc/remnanode-install.conf}"
+
+    print_header "Экспорт конфигурации" "💾"
+
+    log_info "Сбор конфигурации из текущей установки..."
+
+    local cfg_secret="" cfg_port="3000" cfg_domain="" cfg_cert_type="1"
+    local cfg_caddy_port="9443" cfg_cf_token=""
+    local cfg_netbird="n" cfg_monitoring="n" cfg_instance="" cfg_grafana=""
+
+    # RemnawaveNode
+    if [ -f "$REMNANODE_DIR/.env" ]; then
+        cfg_secret=$(grep "^SECRET_KEY=" "$REMNANODE_DIR/.env" 2>/dev/null | cut -d= -f2-)
+        cfg_port=$(grep "^NODE_PORT=" "$REMNANODE_DIR/.env" 2>/dev/null | cut -d= -f2 || echo "3000")
+    fi
+
+    # Caddy
+    if [ -f "$CADDY_DIR/.env" ]; then
+        cfg_domain=$(grep "^SELF_STEAL_DOMAIN=" "$CADDY_DIR/.env" 2>/dev/null | cut -d= -f2)
+        cfg_caddy_port=$(grep "^SELF_STEAL_PORT=" "$CADDY_DIR/.env" 2>/dev/null | cut -d= -f2 || echo "9443")
+        cfg_cf_token=$(grep "^CLOUDFLARE_API_TOKEN=" "$CADDY_DIR/.env" 2>/dev/null | cut -d= -f2)
+        if [ -n "$cfg_cf_token" ]; then
+            cfg_cert_type="2"
+        fi
+        # Убираем wildcard для экспорта
+        cfg_domain=$(echo "$cfg_domain" | sed 's/^\*\.//')
+    fi
+
+    # Netbird
+    if command -v netbird >/dev/null 2>&1; then
+        cfg_netbird="y"
+    fi
+
+    # Мониторинг
+    if [ -d "/opt/monitoring" ]; then
+        cfg_monitoring="y"
+        cfg_instance=$(grep "instance:" /opt/monitoring/vmagent/scrape.yml 2>/dev/null | head -1 | sed 's/.*instance: *"\(.*\)"/\1/')
+        cfg_grafana=$(grep "remoteWrite.url" /etc/systemd/system/vmagent.service 2>/dev/null | grep -oP '//\K[^:]+' || echo "")
+    fi
+
+    # Генерация конфига
+    cat > "$output" << EOF
+# Remnawave Node Install Configuration
+# Сгенерировано: $(date)
+# Сервер: $(get_server_ip)
+
+# Обязательные параметры
+CFG_SECRET_KEY="${cfg_secret}"
+CFG_DOMAIN="${cfg_domain}"
+
+# Параметры ноды
+CFG_NODE_PORT=${cfg_port}
+CFG_INSTALL_XRAY=y
+
+# SSL сертификат (1=обычный, 2=wildcard)
+CFG_CERT_TYPE=${cfg_cert_type}
+CFG_CADDY_PORT=${cfg_caddy_port}
+${cfg_cf_token:+CFG_CLOUDFLARE_TOKEN="${cfg_cf_token}"}
+
+# Сетевые настройки
+CFG_APPLY_NETWORK=y
+
+# Безопасность
+CFG_SETUP_UFW=y
+CFG_INSTALL_FAIL2BAN=y
+
+# Netbird VPN
+CFG_INSTALL_NETBIRD=${cfg_netbird}
+# CFG_NETBIRD_SETUP_KEY=""
+
+# Мониторинг
+CFG_INSTALL_MONITORING=${cfg_monitoring}
+${cfg_instance:+CFG_INSTANCE_NAME="${cfg_instance}"}
+${cfg_grafana:+CFG_GRAFANA_IP="${cfg_grafana}"}
+EOF
+
+    chmod 600 "$output"
+    log_success "Конфигурация экспортирована в $output"
+    echo
+    echo -e "${GRAY}  Используйте для деплоя на новом сервере:${NC}"
+    echo -e "${CYAN}  scp $output root@<new-server>:/etc/remnanode-install.conf${NC}"
+    echo -e "${CYAN}  ssh root@<new-server> 'bash <(curl -fsSL https://raw.githubusercontent.com/Case211/remnanode-install/refs/heads/main/remnanode-install.sh)'${NC}"
     echo
 }
 
@@ -3489,6 +4161,30 @@ case "${1:-}" in
         detect_package_manager
         print_banner
         show_system_status
+        exit 0
+        ;;
+    --update)
+        update_components
+        exit 0
+        ;;
+    --diagnose)
+        run_diagnose
+        exit 0
+        ;;
+    --change-template)
+        change_template
+        exit 0
+        ;;
+    --self-update)
+        self_update
+        exit 0
+        ;;
+    --dry-run)
+        dry_run
+        exit 0
+        ;;
+    --export-config)
+        export_config "${2:-/etc/remnanode-install.conf}"
         exit 0
         ;;
     --uninstall)

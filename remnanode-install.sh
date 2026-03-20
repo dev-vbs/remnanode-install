@@ -2264,6 +2264,8 @@ install_caddy_selfsteal() {
             while [ -z "$CLOUDFLARE_API_TOKEN" ]; do
                 read -s -p "Введите Cloudflare API Token: " -r CLOUDFLARE_API_TOKEN
                 echo
+                # Убираем \r, пробелы и невидимые символы (часто попадают при copy-paste)
+                CLOUDFLARE_API_TOKEN=$(echo "$CLOUDFLARE_API_TOKEN" | tr -d '\r\n ' | sed 's/[^a-zA-Z0-9_-]//g')
                 if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
                     log_error "API Token не может быть пустым!"
                 fi
@@ -2429,14 +2431,6 @@ EOF
       - .env
 EOF
 
-    # Добавление переменной окружения для Cloudflare если используется wildcard
-    if [ "$USE_WILDCARD" = true ]; then
-        cat >> "$CADDY_DIR/docker-compose.yml" << EOF
-    environment:
-      - CLOUDFLARE_API_TOKEN=\${CLOUDFLARE_API_TOKEN}
-EOF
-    fi
-
     cat >> "$CADDY_DIR/docker-compose.yml" << EOF
     network_mode: "host"
     logging:
@@ -2591,13 +2585,15 @@ EOF
         fi
     fi
 
-    # Запуск Caddy
+    # Загрузка образа и запуск Caddy
+    log_info "Загрузка образа Caddy..."
+    docker compose --project-directory "$CADDY_DIR" pull --quiet 2>/dev/null || true
     log_info "Запуск Caddy..."
     docker compose --project-directory "$CADDY_DIR" up -d
 
     # Проверка что контейнер поднялся (с ожиданием до 30 сек)
     log_info "Ожидание запуска контейнера..."
-    if check_container_health "$CADDY_DIR" "caddy-selfsteal" 30; then
+    if check_container_health "$CADDY_DIR" "caddy" 30; then
         log_success "Caddy запущен"
         STATUS_CADDY="установлен"
     else
